@@ -18,27 +18,31 @@
 #define wasm_ir_module_h
 
 #include "pass.h"
+#include "support/insert_ordered.h"
 #include "support/unique_deferring_queue.h"
 #include "wasm.h"
 
 namespace wasm::ModuleUtils {
 
 // Copies a function into a module. If newName is provided it is used as the
-// name of the function (otherwise the original name is copied). If fileIndexMap
-// is specified, it is used to rename source map filename indices when copying
-// the function from one module to another one.
-Function*
-copyFunction(Function* func,
-             Module& out,
-             Name newName = Name(),
-             std::optional<std::vector<Index>> fileIndexMap = std::nullopt);
+// name of the function (otherwise the original name is copied). When specified,
+// fileIndexMap and symbolNameIndexMap are used to rename source map filename
+// and symbol name indices when copying the function from one module to another
+// one.
+Function* copyFunction(
+  Function* func,
+  Module& out,
+  Name newName = Name(),
+  std::optional<std::vector<Index>> fileIndexMap = std::nullopt,
+  std::optional<std::vector<Index>> symbolNameIndexMap = std::nullopt);
 
 // As above, but does not add the copy to the module.
 std::unique_ptr<Function> copyFunctionWithoutAdd(
   Function* func,
   Module& out,
   Name newName = Name(),
-  std::optional<std::vector<Index>> fileIndexMap = std::nullopt);
+  std::optional<std::vector<Index>> fileIndexMap = std::nullopt,
+  std::optional<std::vector<Index>> symbolNameIndexMap = std::nullopt);
 
 Global* copyGlobal(Global* global, Module& out);
 
@@ -441,6 +445,35 @@ template<typename T> struct CallGraphPropertyAnalysis {
     }
   }
 };
+
+// Which types to collect.
+//
+//   AllTypes - Any type anywhere reachable from anything.
+//
+//   UsedIRTypes - Same as AllTypes, but excludes types reachable only because
+//   they are in a rec group with some other used type and types that are only
+//   used from other unreachable types.
+//
+//   BinaryTypes - Only types that need to appear in the module's type section.
+//
+enum class TypeInclusion { AllTypes, UsedIRTypes, BinaryTypes };
+
+// Whether to classify collected types as public and private.
+enum class VisibilityHandling { NoVisibility, FindVisibility };
+
+// Whether a type is public or private. If visibility is not analyzed, the
+// visibility will be Unknown instead.
+enum class Visibility { Unknown, Public, Private };
+
+struct HeapTypeInfo {
+  Index useCount = 0;
+  Visibility visibility = Visibility::Unknown;
+};
+
+InsertOrderedMap<HeapType, HeapTypeInfo> collectHeapTypeInfo(
+  Module& wasm,
+  TypeInclusion inclusion = TypeInclusion::AllTypes,
+  VisibilityHandling visibility = VisibilityHandling::NoVisibility);
 
 // Helper function for collecting all the non-basic heap types used in the
 // module, i.e. the types that would appear in the type section.

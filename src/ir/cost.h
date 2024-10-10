@@ -206,6 +206,13 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
       case NegVecI64x2:
       case AllTrueVecI64x2:
       case BitmaskVecI64x2:
+      case AbsVecF16x8:
+      case NegVecF16x8:
+      case SqrtVecF16x8:
+      case CeilVecF16x8:
+      case FloorVecF16x8:
+      case TruncVecF16x8:
+      case NearestVecF16x8:
       case AbsVecF32x4:
       case NegVecF32x4:
       case SqrtVecF32x4:
@@ -250,6 +257,10 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
       case RelaxedTruncUVecF32x4ToVecI32x4:
       case RelaxedTruncZeroSVecF64x2ToVecI32x4:
       case RelaxedTruncZeroUVecF64x2ToVecI32x4:
+      case TruncSatSVecF16x8ToVecI16x8:
+      case TruncSatUVecF16x8ToVecI16x8:
+      case ConvertSVecI16x8ToVecF16x8:
+      case ConvertUVecI16x8ToVecF16x8:
         ret = 1;
         break;
       case InvalidUnary:
@@ -475,6 +486,22 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
       case ExtMulHighSVecI64x2:
       case ExtMulLowUVecI64x2:
       case ExtMulHighUVecI64x2:
+      case AddVecF16x8:
+      case SubVecF16x8:
+        ret = 1;
+        break;
+      case MulVecF16x8:
+        ret = 2;
+        break;
+      case DivVecF16x8:
+        ret = 3;
+        break;
+      case MinVecF16x8:
+      case MaxVecF16x8:
+      case PMinVecF16x8:
+      case PMaxVecF16x8:
+        ret = 1;
+        break;
       case AddVecF32x4:
       case SubVecF32x4:
         ret = 1;
@@ -559,10 +586,12 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
       case LaneselectI16x8:
       case LaneselectI32x4:
       case LaneselectI64x2:
-      case RelaxedFmaVecF32x4:
-      case RelaxedFmsVecF32x4:
-      case RelaxedFmaVecF64x2:
-      case RelaxedFmsVecF64x2:
+      case RelaxedMaddVecF16x8:
+      case RelaxedNmaddVecF16x8:
+      case RelaxedMaddVecF32x4:
+      case RelaxedNmaddVecF32x4:
+      case RelaxedMaddVecF64x2:
+      case RelaxedNmaddVecF64x2:
       case DotI8x16I7x16AddSToVecI32x4:
         ret = 1;
         break;

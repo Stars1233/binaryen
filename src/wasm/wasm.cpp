@@ -56,6 +56,7 @@ const char* StringsFeature = "strings";
 const char* MultiMemoryFeature = "multimemory";
 const char* TypedContinuationsFeature = "typed-continuations";
 const char* SharedEverythingFeature = "shared-everything";
+const char* FP16Feature = "fp16";
 } // namespace CustomSections
 } // namespace BinaryConsts
 
@@ -651,6 +652,13 @@ void Unary::finalize() {
     case NegVecI16x8:
     case NegVecI32x4:
     case NegVecI64x2:
+    case AbsVecF16x8:
+    case NegVecF16x8:
+    case SqrtVecF16x8:
+    case CeilVecF16x8:
+    case FloorVecF16x8:
+    case TruncVecF16x8:
+    case NearestVecF16x8:
     case AbsVecF32x4:
     case NegVecF32x4:
     case SqrtVecF32x4:
@@ -695,6 +703,10 @@ void Unary::finalize() {
     case RelaxedTruncUVecF32x4ToVecI32x4:
     case RelaxedTruncZeroSVecF64x2ToVecI32x4:
     case RelaxedTruncZeroUVecF64x2ToVecI32x4:
+    case TruncSatSVecF16x8ToVecI16x8:
+    case TruncSatUVecF16x8ToVecI16x8:
+    case ConvertSVecI16x8ToVecF16x8:
+    case ConvertUVecI16x8ToVecF16x8:
       type = Type::v128;
       break;
     case AnyTrueVec128:
@@ -1000,7 +1012,25 @@ void CallRef::finalize() {
     return;
   }
   assert(target->type.isRef());
-  if (target->type.getHeapType().isBottom()) {
+  if (target->type.isNull()) {
+    // If this call_ref has been optimized to have a null reference, then it
+    // will definitely trap. We could update the type to be unreachable, but
+    // that would violate the invariant that non-branch instructions other than
+    // `unreachable` can only be unreachable if they have unreachable children.
+    // Make the result type as close to `unreachable` as possible without
+    // actually making it unreachable. TODO: consider just making this
+    // unreachable instead (and similar in other GC accessors), although this
+    // would currently cause the parser to admit more invalid modules.
+    if (type.isRef()) {
+      type = Type(type.getHeapType().getBottom(), NonNullable);
+    } else if (type.isTuple()) {
+      Tuple elems;
+      for (auto t : type) {
+        elems.push_back(
+          t.isRef() ? Type(t.getHeapType().getBottom(), NonNullable) : t);
+      }
+      type = Type(elems);
+    }
     return;
   }
   assert(target->type.getHeapType().isSignature());
@@ -1128,7 +1158,12 @@ void StructNew::finalize() {
 void StructGet::finalize() {
   if (ref->type == Type::unreachable) {
     type = Type::unreachable;
-  } else if (!ref->type.isNull()) {
+  } else if (ref->type.isNull()) {
+    // See comment on CallRef for explanation.
+    if (type.isRef()) {
+      type = Type(type.getHeapType().getBottom(), NonNullable);
+    }
+  } else {
     type = ref->type.getHeapType().getStruct().fields[index].type;
   }
 }
@@ -1172,7 +1207,12 @@ void ArrayNewFixed::finalize() {
 void ArrayGet::finalize() {
   if (ref->type == Type::unreachable || index->type == Type::unreachable) {
     type = Type::unreachable;
-  } else if (!ref->type.isNull()) {
+  } else if (ref->type.isNull()) {
+    // See comment on CallRef for explanation.
+    if (type.isRef()) {
+      type = Type(type.getHeapType().getBottom(), NonNullable);
+    }
+  } else {
     type = ref->type.getHeapType().getArray().element.type;
   }
 }
@@ -1823,6 +1863,9 @@ void Module::updateMaps() {
   assert(tagsMap.size() == tags.size());
 }
 
-void Module::clearDebugInfo() { debugInfoFileNames.clear(); }
+void Module::clearDebugInfo() {
+  debugInfoFileNames.clear();
+  debugInfoSymbolNames.clear();
+}
 
 } // namespace wasm

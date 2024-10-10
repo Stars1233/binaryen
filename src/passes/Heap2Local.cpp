@@ -152,6 +152,7 @@
 
 #include "ir/bits.h"
 #include "ir/branch-utils.h"
+#include "ir/eh-utils.h"
 #include "ir/find_all.h"
 #include "ir/local-graph.h"
 #include "ir/parents.h"
@@ -198,15 +199,17 @@ enum class ParentChildInteraction : int8_t {
 struct EscapeAnalyzer {
   // To find what escapes, we need to follow where values flow, both up to
   // parents, and via branches, and through locals.
-  // TODO: for efficiency, only scan reference types in LocalGraph
-  const LocalGraph& localGraph;
+  //
+  // We use a lazy graph here because we only need this for reference locals,
+  // and even among them, only ones we see an allocation is stored to.
+  const LazyLocalGraph& localGraph;
   const Parents& parents;
   const BranchUtils::BranchTargets& branchTargets;
 
   const PassOptions& passOptions;
   Module& wasm;
 
-  EscapeAnalyzer(const LocalGraph& localGraph,
+  EscapeAnalyzer(const LazyLocalGraph& localGraph,
                  const Parents& parents,
                  const BranchUtils::BranchTargets& branchTargets,
                  const PassOptions& passOptions,
@@ -279,10 +282,8 @@ struct EscapeAnalyzer {
         sets.insert(set);
 
         // We must also look at how the value flows from those gets.
-        if (auto* getsReached = getGetsReached(set)) {
-          for (auto* get : *getsReached) {
-            flows.push({get, parents.getParent(get)});
-          }
+        for (auto* get : localGraph.getSetInfluences(set)) {
+          flows.push({get, parents.getParent(get)});
         }
       }
 
@@ -479,14 +480,6 @@ struct EscapeAnalyzer {
     return ParentChildInteraction::Mixes;
   }
 
-  const LocalGraph::SetInfluences* getGetsReached(LocalSet* set) {
-    auto iter = localGraph.setInfluences.find(set);
-    if (iter != localGraph.setInfluences.end()) {
-      return &iter->second;
-    }
-    return nullptr;
-  }
-
   const BranchUtils::NameSet branchesSentByParent(Expression* child,
                                                   Expression* parent) {
     BranchUtils::NameSet names;
@@ -508,18 +501,14 @@ struct EscapeAnalyzer {
     // Find all the relevant gets (which may overlap between the sets).
     std::unordered_set<LocalGet*> gets;
     for (auto* set : sets) {
-      if (auto* getsReached = getGetsReached(set)) {
-        for (auto* get : *getsReached) {
-          gets.insert(get);
-        }
+      for (auto* get : localGraph.getSetInfluences(set)) {
+        gets.insert(get);
       }
     }
 
     // Check that the gets can only read from the specific known sets.
     for (auto* get : gets) {
-      auto iter = localGraph.getSetses.find(get);
-      assert(iter != localGraph.getSetses.end());
-      for (auto* set : iter->second) {
+      for (auto* set : localGraph.getSets(get)) {
         if (sets.count(set) == 0) {
           return false;
         }
@@ -1153,16 +1142,13 @@ struct Heap2Local {
   Module& wasm;
   const PassOptions& passOptions;
 
-  LocalGraph localGraph;
+  LazyLocalGraph localGraph;
   Parents parents;
   BranchUtils::BranchTargets branchTargets;
 
   Heap2Local(Function* func, Module& wasm, const PassOptions& passOptions)
     : func(func), wasm(wasm), passOptions(passOptions), localGraph(func, &wasm),
       parents(func->body), branchTargets(func->body) {
-    // We need to track what each set influences, to see where its value can
-    // flow to.
-    localGraph.computeSetInfluences();
 
     // Find all the relevant allocations in the function: StructNew, ArrayNew,
     // ArrayNewFixed.
@@ -1206,8 +1192,15 @@ struct Heap2Local {
         // some cases, so to be careful here use a fairly small limit.
         return size < 20;
       }
+
+      // Also note if a pop exists here, as they may require fixups.
+      bool hasPop = false;
+
+      void visitPop(Pop* curr) { hasPop = true; }
     } finder;
     finder.walk(func->body);
+
+    bool optimized = false;
 
     // First, lower non-escaping arrays into structs. That allows us to handle
     // arrays in a single place, and let all the rest of this pass assume we are
@@ -1230,6 +1223,7 @@ struct Heap2Local {
         auto* structNew =
           Array2Struct(allocation, analyzer, func, wasm).structNew;
         Struct2Local(structNew, analyzer, func, wasm);
+        optimized = true;
       }
     }
 
@@ -1246,7 +1240,15 @@ struct Heap2Local {
         localGraph, parents, branchTargets, passOptions, wasm);
       if (!analyzer.escapes(allocation)) {
         Struct2Local(allocation, analyzer, func, wasm);
+        optimized = true;
       }
+    }
+
+    // We conservatively run the EH pop fixup if this function has a 'pop' and
+    // if we have ever optimized, as all of the things we do here involve
+    // creating blocks, so we might have moved pops into the blocks.
+    if (finder.hasPop && optimized) {
+      EHUtils::handleBlockNestedPops(func, wasm);
     }
   }
 

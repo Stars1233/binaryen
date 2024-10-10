@@ -176,15 +176,6 @@ struct BreakValueDropper : public ControlFlowWalker<BreakValueDropper> {
   }
 };
 
-static bool hasUnreachableChild(Block* block) {
-  for (auto* test : block->list) {
-    if (test->type == Type::unreachable) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // Checks for code after an unreachable element.
 static bool hasDeadCode(Block* block) {
   auto& list = block->list;
@@ -197,8 +188,47 @@ static bool hasDeadCode(Block* block) {
   return false;
 }
 
-// core block optimizer routine
-static void optimizeBlock(Block* curr,
+// Given a dropped block, see if we can simplify it by optimizing the drop into
+// the block, removing the return value while doin so. Returns whether we
+// succeeded.
+static bool optimizeDroppedBlock(Drop* drop,
+                                 Block* block,
+                                 Module& wasm,
+                                 PassOptions& options,
+                                 BranchUtils::BranchSeekerCache& branchInfo) {
+  assert(drop->value == block);
+  if (block->name.is()) {
+    // There may be breaks: see if we can remove their values.
+    Expression* expression = block;
+    ProblemFinder finder(options);
+    finder.setModule(&wasm);
+    finder.origin = block->name;
+    finder.walk(expression);
+    if (finder.found()) {
+      // We found a problem that blocks us.
+      return false;
+    }
+
+    // Success. Fix up breaks before continuing to handle the drop itself.
+    BreakValueDropper fixer(options, branchInfo);
+    fixer.origin = block->name;
+    fixer.setModule(&wasm);
+    fixer.walk(expression);
+  }
+
+  // Optimize by removing the block. Reuse the drop, if we still need it.
+  auto* last = block->list.back();
+  if (last->type.isConcrete()) {
+    drop->value = last;
+    drop->finalize();
+    block->list.back() = drop;
+  }
+  block->finalize();
+  return true;
+}
+
+// Core block optimizer routine. Returns true when we optimize.
+static bool optimizeBlock(Block* curr,
                           Module* module,
                           PassOptions& passOptions,
                           BranchUtils::BranchSeekerCache& branchInfo) {
@@ -218,47 +248,18 @@ static void optimizeBlock(Block* curr,
       Loop* loop = nullptr;
       // To to handle a non-block child.
       if (!childBlock) {
-        // if we have a child that is (drop (block ..)) then we can move the
-        // drop into the block, and remove br values. this allows more merging,
+        // If we have a child that is (drop (block ..)) then we can move the
+        // drop into the block, and remove br values. This allows more merging.
         if (auto* drop = list[i]->dynCast<Drop>()) {
           childBlock = drop->value->dynCast<Block>();
-          if (childBlock) {
-            if (hasUnreachableChild(childBlock)) {
-              // don't move around unreachable code, as it can change types
-              // dce should have been run anyhow
-              continue;
-            }
-            if (childBlock->name.is()) {
-              Expression* expression = childBlock;
-              // check if it's ok to remove the value from all breaks to us
-              ProblemFinder finder(passOptions);
-              finder.setModule(module);
-              finder.origin = childBlock->name;
-              finder.walk(expression);
-              if (finder.found()) {
-                childBlock = nullptr;
-              } else {
-                // fix up breaks
-                BreakValueDropper fixer(passOptions, branchInfo);
-                fixer.origin = childBlock->name;
-                fixer.setModule(module);
-                fixer.walk(expression);
-              }
-            }
-            if (childBlock) {
-              // we can do it!
-              // reuse the drop, if we still need it
-              auto* last = childBlock->list.back();
-              if (last->type.isConcrete()) {
-                drop->value = last;
-                drop->finalize();
-                childBlock->list.back() = drop;
-              }
-              childBlock->finalize();
-              child = list[i] = childBlock;
-              more = true;
-              changed = true;
-            }
+          if (childBlock &&
+              optimizeDroppedBlock(
+                drop, childBlock, *module, passOptions, branchInfo)) {
+            child = list[i] = childBlock;
+            more = true;
+            changed = true;
+          } else {
+            childBlock = nullptr;
           }
         } else if ((loop = list[i]->dynCast<Loop>())) {
           // We can merge a loop's "tail" - if the body is a block and has
@@ -397,6 +398,7 @@ static void optimizeBlock(Block* curr,
   if (changed) {
     curr->finalize(curr->type);
   }
+  return changed;
 }
 
 void BreakValueDropper::visitBlock(Block* curr) {
@@ -412,10 +414,22 @@ struct MergeBlocks
     return std::make_unique<MergeBlocks>();
   }
 
+  bool refinalize = false;
+
   BranchUtils::BranchSeekerCache branchInfo;
 
   void visitBlock(Block* curr) {
     optimizeBlock(curr, getModule(), getPassOptions(), branchInfo);
+  }
+
+  void visitDrop(Drop* curr) {
+    if (auto* block = curr->value->dynCast<Block>()) {
+      if (optimizeDroppedBlock(
+            curr, block, *getModule(), getPassOptions(), branchInfo)) {
+        replaceCurrent(block);
+        refinalize = true;
+      }
+    }
   }
 
   // given
@@ -461,13 +475,6 @@ struct MergeBlocks
     }
     if (auto* block = child->dynCast<Block>()) {
       if (!block->name.is() && block->list.size() >= 2) {
-        // if we move around unreachable code, type changes could occur. avoid
-        // that, as anyhow it means we should have run dce before getting here
-        if (curr->type == Type::none && hasUnreachableChild(block)) {
-          // moving the block to the outside would replace a none with an
-          // unreachable
-          return outer;
-        }
         auto* back = block->list.back();
         if (back->type == Type::unreachable) {
           // curr is not reachable, dce could remove it; don't try anything
@@ -486,6 +493,7 @@ struct MergeBlocks
           return outer;
         }
         child = back;
+        refinalize = true;
         if (outer == nullptr) {
           // reuse the block, move it out
           block->list.back() = curr;
@@ -576,8 +584,7 @@ struct MergeBlocks
       // too small for us to remove anything from (we cannot remove the last
       // element), or if it has unreachable code (leave that for dce), then give
       // up.
-      if (!block || block->name.is() || block->list.size() <= 1 ||
-          hasUnreachableChild(block)) {
+      if (!block || block->name.is() || block->list.size() <= 1) {
         continueEarly();
         continue;
       }
@@ -658,6 +665,7 @@ struct MergeBlocks
       outerBlock->list.push_back(curr);
       outerBlock->finalize(curr->type);
       replaceCurrent(outerBlock);
+      refinalize = true;
     }
   }
 
@@ -674,6 +682,12 @@ struct MergeBlocks
         return;
       }
       outer = optimize(curr, curr->operands[i], outer);
+    }
+  }
+
+  void visitFunction(Function* curr) {
+    if (refinalize) {
+      ReFinalize().walkFunctionInModule(curr, getModule());
     }
   }
 };

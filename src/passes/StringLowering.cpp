@@ -153,9 +153,12 @@ struct StringGathering : public Pass {
       [[maybe_unused]] bool valid =
         String::convertWTF16ToWTF8(wtf8, string.str);
       assert(valid);
-      // TODO: Use wtf8.view() once we have C++20.
+      // Then escape it because identifiers must be valid UTF-8.
+      // TODO: Use wtf8.view() and escaped.view() once we have C++20.
+      std::stringstream escaped;
+      String::printEscaped(escaped, wtf8.str());
       auto name = Names::getValidGlobalName(
-        *module, std::string("string.const_") + std::string(wtf8.str()));
+        *module, std::string("string.const_") + std::string(escaped.str()));
       globalName = name;
       newNames.insert(name);
       auto* stringConst = builder.makeStringConst(string);
@@ -194,8 +197,16 @@ struct StringLowering : public StringGathering {
   // instead of emitting them into the JSON custom section.
   bool useMagicImports;
 
-  StringLowering(bool useMagicImports = false)
-    : useMagicImports(useMagicImports) {}
+  // Whether to throw a fatal error on non-UTF8 strings that would not be able
+  // to use the "magic import" mechanism. Only usable in conjunction with magic
+  // imports.
+  bool assertUTF8;
+
+  StringLowering(bool useMagicImports = false, bool assertUTF8 = false)
+    : useMagicImports(useMagicImports), assertUTF8(assertUTF8) {
+    // If we are asserting valid UTF-8, we must be using magic imports.
+    assert(!assertUTF8 || useMagicImports);
+  }
 
   void run(Module* module) override {
     if (!module->features.has(FeatureSet::Strings)) {
@@ -227,7 +238,6 @@ struct StringLowering : public StringGathering {
   void makeImports(Module* module) {
     Index jsonImportIndex = 0;
     std::stringstream json;
-    json << '[';
     bool first = true;
     for (auto& global : module->globals) {
       if (global->init) {
@@ -238,6 +248,12 @@ struct StringLowering : public StringGathering {
             global->module = "'";
             global->base = Name(utf8.str());
           } else {
+            if (assertUTF8) {
+              std::stringstream escaped;
+              String::printEscaped(escaped, utf8.str());
+              Fatal() << "Cannot lower non-UTF-16 string " << escaped.str()
+                      << '\n';
+            }
             global->module = "string.const";
             global->base = std::to_string(jsonImportIndex);
             if (first) {
@@ -253,12 +269,16 @@ struct StringLowering : public StringGathering {
       }
     }
 
-    // Add a custom section with the JSON.
-    json << ']';
-    auto str = json.str();
-    auto vec = std::vector<char>(str.begin(), str.end());
-    module->customSections.emplace_back(
-      CustomSection{"string.consts", std::move(vec)});
+    auto jsonString = json.str();
+    if (!jsonString.empty()) {
+      // If we are asserting UTF8, then we shouldn't be generating any JSON.
+      assert(!assertUTF8);
+      // Add a custom section with the JSON.
+      auto str = '[' + jsonString + ']';
+      auto vec = std::vector<char>(str.begin(), str.end());
+      module->customSections.emplace_back(
+        CustomSection{"string.consts", std::move(vec)});
+    }
   }
 
   // Common types used in imports.
@@ -534,5 +554,8 @@ struct StringLowering : public StringGathering {
 Pass* createStringGatheringPass() { return new StringGathering(); }
 Pass* createStringLoweringPass() { return new StringLowering(); }
 Pass* createStringLoweringMagicImportPass() { return new StringLowering(true); }
+Pass* createStringLoweringMagicImportAssertPass() {
+  return new StringLowering(true, true);
+}
 
 } // namespace wasm

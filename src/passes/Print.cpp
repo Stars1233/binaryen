@@ -770,17 +770,23 @@ struct PrintExpressionContents
       case LaneselectI64x2:
         o << "i64x2.laneselect";
         break;
-      case RelaxedFmaVecF32x4:
-        o << "f32x4.relaxed_fma";
+      case RelaxedMaddVecF16x8:
+        o << "f16x8.relaxed_madd";
         break;
-      case RelaxedFmsVecF32x4:
-        o << "f32x4.relaxed_fms";
+      case RelaxedNmaddVecF16x8:
+        o << "f16x8.relaxed_nmadd";
         break;
-      case RelaxedFmaVecF64x2:
-        o << "f64x2.relaxed_fma";
+      case RelaxedMaddVecF32x4:
+        o << "f32x4.relaxed_madd";
         break;
-      case RelaxedFmsVecF64x2:
-        o << "f64x2.relaxed_fms";
+      case RelaxedNmaddVecF32x4:
+        o << "f32x4.relaxed_nmadd";
+        break;
+      case RelaxedMaddVecF64x2:
+        o << "f64x2.relaxed_madd";
+        break;
+      case RelaxedNmaddVecF64x2:
+        o << "f64x2.relaxed_nmadd";
         break;
       case DotI8x16I7x16AddSToVecI32x4:
         o << "i32x4.dot_i8x16_i7x16_add_s";
@@ -1209,6 +1215,27 @@ struct PrintExpressionContents
       case BitmaskVecI64x2:
         o << "i64x2.bitmask";
         break;
+      case AbsVecF16x8:
+        o << "f16x8.abs";
+        break;
+      case NegVecF16x8:
+        o << "f16x8.neg";
+        break;
+      case SqrtVecF16x8:
+        o << "f16x8.sqrt";
+        break;
+      case CeilVecF16x8:
+        o << "f16x8.ceil";
+        break;
+      case FloorVecF16x8:
+        o << "f16x8.floor";
+        break;
+      case TruncVecF16x8:
+        o << "f16x8.trunc";
+        break;
+      case NearestVecF16x8:
+        o << "f16x8.nearest";
+        break;
       case AbsVecF32x4:
         o << "f32x4.abs";
         break;
@@ -1340,6 +1367,18 @@ struct PrintExpressionContents
         break;
       case RelaxedTruncZeroUVecF64x2ToVecI32x4:
         o << "i32x4.relaxed_trunc_f64x2_u_zero";
+        break;
+      case TruncSatSVecF16x8ToVecI16x8:
+        o << "i16x8.trunc_sat_f16x8_s";
+        break;
+      case TruncSatUVecF16x8ToVecI16x8:
+        o << "i16x8.trunc_sat_f16x8_u";
+        break;
+      case ConvertSVecI16x8ToVecF16x8:
+        o << "f16x8.convert_i16x8_s";
+        break;
+      case ConvertUVecI16x8ToVecF16x8:
+        o << "f16x8.convert_i16x8_u";
         break;
       case InvalidUnary:
         WASM_UNREACHABLE("unvalid unary operator");
@@ -1901,6 +1940,31 @@ struct PrintExpressionContents
         o << "i64x2.extmul_high_i32x4_u";
         break;
 
+      case AddVecF16x8:
+        o << "f16x8.add";
+        break;
+      case SubVecF16x8:
+        o << "f16x8.sub";
+        break;
+      case MulVecF16x8:
+        o << "f16x8.mul";
+        break;
+      case DivVecF16x8:
+        o << "f16x8.div";
+        break;
+      case MinVecF16x8:
+        o << "f16x8.min";
+        break;
+      case MaxVecF16x8:
+        o << "f16x8.max";
+        break;
+      case PMinVecF16x8:
+        o << "f16x8.pmin";
+        break;
+      case PMaxVecF16x8:
+        o << "f16x8.pmax";
+        break;
+
       case AddVecF32x4:
         o << "f32x4.add";
         break;
@@ -2452,7 +2516,15 @@ void PrintSExpression::printDebugLocation(
   } else {
     auto fileName = currModule->debugInfoFileNames[location->fileIndex];
     o << ";;@ " << fileName << ":" << location->lineNumber << ":"
-      << location->columnNumber << '\n';
+      << location->columnNumber;
+
+    if (location->symbolNameIndex) {
+      auto symbolName =
+        currModule->debugInfoSymbolNames[*(location->symbolNameIndex)];
+      o << ":" << symbolName;
+    }
+
+    o << '\n';
   }
   doIndent(o, indent);
 }
@@ -2804,13 +2876,21 @@ bool PrintSExpression::maybePrintUnreachableOrNullReplacement(Expression* curr,
   return maybePrintUnreachableReplacement(curr, type);
 }
 
+static bool requiresExplicitFuncType(HeapType type) {
+  // When the `(type $f)` in a function's typeuse is omitted, the typeuse
+  // matches or declares an MVP function type. When the intended type is not an
+  // MVP function type, we therefore need the explicit `(type $f)`.
+  return type.isOpen() || type.isShared() || type.getRecGroup().size() > 1;
+}
+
 void PrintSExpression::handleSignature(HeapType curr, Name name) {
   Signature sig = curr.getSignature();
   o << "(func";
   if (name.is()) {
     o << ' ';
     name.print(o);
-    if (currModule && currModule->features.hasGC()) {
+    if ((currModule && currModule->features.hasGC()) ||
+        requiresExplicitFuncType(curr)) {
       o << " (type ";
       printHeapType(curr) << ')';
     }
@@ -2920,6 +3000,9 @@ void PrintSExpression::visitDefinedGlobal(Global* curr) {
 void PrintSExpression::visitFunction(Function* curr) {
   if (curr->imported()) {
     visitImportedFunction(curr);
+  } else if (curr->body == nullptr) {
+    // We are in the middle of parsing the module and have not parsed this
+    // function's code yet. Skip it.
   } else {
     visitDefinedFunction(curr);
   }
@@ -2947,7 +3030,8 @@ void PrintSExpression::visitDefinedFunction(Function* curr) {
   o << '(';
   printMajor(o, "func ");
   curr->name.print(o);
-  if (currModule && currModule->features.hasGC()) {
+  if ((currModule && currModule->features.hasGC()) ||
+      requiresExplicitFuncType(curr->type)) {
     o << " (type ";
     printHeapType(curr->type) << ')';
   }
@@ -3174,6 +3258,11 @@ void PrintSExpression::visitMemory(Memory* curr) {
 }
 
 void PrintSExpression::visitDataSegment(DataSegment* curr) {
+  if (!curr->isPassive && !curr->offset) {
+    // This data segment must have been created from the datacount section but
+    // not parsed yet. Skip it.
+    return;
+  }
   doIndent(o, indent);
   o << '(';
   printMajor(o, "data ");
@@ -3631,6 +3720,11 @@ std::ostream& operator<<(std::ostream& o, wasm::ShallowExpression expression) {
 
 std::ostream& operator<<(std::ostream& o, wasm::StackInst& inst) {
   return wasm::printStackInst(&inst, o);
+}
+
+std::ostream& operator<<(std::ostream& o, wasm::ModuleType pair) {
+  wasm::printTypeOrName(pair.second, o, &pair.first);
+  return o;
 }
 
 } // namespace std

@@ -41,43 +41,6 @@ namespace wasm {
 
 namespace {
 
-struct TypeInfo {
-  using type_t = Type;
-  // Used in assertions to ensure that temporary types don't leak into the
-  // global store.
-  bool isTemp = false;
-  enum Kind {
-    TupleKind,
-    RefKind,
-  } kind;
-  struct Ref {
-    HeapType heapType;
-    Nullability nullability;
-  };
-  union {
-    Tuple tuple;
-    Ref ref;
-  };
-
-  TypeInfo(const Tuple& tuple) : kind(TupleKind), tuple(tuple) {}
-  TypeInfo(Tuple&& tuple) : kind(TupleKind), tuple(std::move(tuple)) {}
-  TypeInfo(HeapType heapType, Nullability nullable)
-    : kind(RefKind), ref{heapType, nullable} {}
-  TypeInfo(const TypeInfo& other);
-  ~TypeInfo();
-
-  constexpr bool isTuple() const { return kind == TupleKind; }
-  constexpr bool isRef() const { return kind == RefKind; }
-
-  // If this TypeInfo represents a Type that can be represented more simply,
-  // return that simpler Type. For example, this handles eliminating singleton
-  // tuple types.
-  std::optional<Type> getCanonical() const;
-
-  bool operator==(const TypeInfo& other) const;
-  bool operator!=(const TypeInfo& other) const { return !(*this == other); }
-};
-
 using RecGroupInfo = std::vector<HeapType>;
 
 struct HeapTypeInfo {
@@ -403,11 +366,6 @@ public:
 namespace wasm {
 namespace {
 
-TypeInfo* getTypeInfo(Type type) {
-  assert(!type.isBasic());
-  return (TypeInfo*)type.getID();
-}
-
 HeapTypeInfo* getHeapTypeInfo(HeapType ht) {
   assert(!ht.isBasic());
   return (HeapTypeInfo*)ht.getID();
@@ -419,12 +377,14 @@ HeapType asHeapType(std::unique_ptr<HeapTypeInfo>& info) {
 
 Type markTemp(Type type) {
   if (!type.isBasic()) {
-    getTypeInfo(type)->isTemp = true;
+    Type::getTypeInfo(type)->isTemp = true;
   }
   return type;
 }
 
-bool isTemp(Type type) { return !type.isBasic() && getTypeInfo(type)->isTemp; }
+bool isTemp(Type type) {
+  return !type.isBasic() && Type::getTypeInfo(type)->isTemp;
+}
 
 bool isTemp(HeapType type) {
   return !type.isBasic() && getHeapTypeInfo(type)->isTemp;
@@ -517,6 +477,10 @@ std::optional<HeapType> getBasicHeapTypeLUB(HeapType::BasicHeapType a,
   return {lubUnshared.getBasic(share)};
 }
 
+} // anonymous namespace
+
+TypeInfo::TypeInfo(const Tuple& tuple) : kind(TupleKind), tuple(tuple) {}
+
 TypeInfo::TypeInfo(const TypeInfo& other) {
   kind = other.kind;
   switch (kind) {
@@ -587,6 +551,8 @@ HeapTypeInfo::~HeapTypeInfo() {
   }
   WASM_UNREACHABLE("unexpected kind");
 }
+
+namespace {
 
 struct TypeStore {
   std::recursive_mutex mutex;
@@ -756,63 +722,11 @@ Type::Type(HeapType heapType, Nullability nullable) {
   new (this) Type(globalTypeStore.insert(TypeInfo(heapType, nullable)));
 }
 
-bool Type::isTuple() const {
-  if (isBasic()) {
-    return false;
-  } else {
-    return getTypeInfo(*this)->isTuple();
-  }
-}
-
-bool Type::isRef() const {
-  if (isBasic()) {
-    return false;
-  } else {
-    return getTypeInfo(*this)->isRef();
-  }
-}
-
-bool Type::isFunction() const {
-  if (isBasic()) {
-    return false;
-  } else {
-    auto* info = getTypeInfo(*this);
-    return info->isRef() && info->ref.heapType.isFunction();
-  }
-}
-
-bool Type::isData() const {
-  if (isBasic()) {
-    return false;
-  } else {
-    auto* info = getTypeInfo(*this);
-    return info->isRef() && info->ref.heapType.isData();
-  }
-}
-
-bool Type::isNullable() const {
-  if (isRef()) {
-    return getTypeInfo(*this)->ref.nullability == Nullable;
-  } else {
-    return false;
-  }
-}
-
-bool Type::isNonNullable() const {
-  if (isRef()) {
-    return getTypeInfo(*this)->ref.nullability == NonNullable;
-  } else {
-    return false;
-  }
-}
-
-bool Type::isSignature() const {
-  return isRef() && getHeapType().isSignature();
-}
-
 bool Type::isStruct() const { return isRef() && getHeapType().isStruct(); }
 
 bool Type::isArray() const { return isRef() && getHeapType().isArray(); }
+
+bool Type::isExn() const { return isRef() && getHeapType().isExn(); }
 
 bool Type::isString() const { return isRef() && getHeapType().isString(); }
 
@@ -915,16 +829,6 @@ FeatureSet Type::getFeatures() const {
     return feats;
   }
   return getSingleFeatures(*this);
-}
-
-const Tuple& Type::getTuple() const {
-  assert(isTuple());
-  return getTypeInfo(*this)->tuple;
-}
-
-HeapType Type::getHeapType() const {
-  assert(isRef());
-  return getTypeInfo(*this)->ref.heapType;
 }
 
 Type Type::get(unsigned byteSize, bool float_) {
@@ -1233,42 +1137,46 @@ size_t HeapType::getDepth() const {
   // In addition to the explicit supertypes we just traversed over, there is
   // implicit supertyping wrt basic types. A signature type always has one more
   // super, HeapType::func, etc.
-  if (!isBasic()) {
-    if (isFunction() || isContinuation()) {
-      depth++;
-    } else if (isStruct()) {
+  switch (getKind()) {
+    case HeapTypeKind::Basic:
+      // Some basic types have supers.
+      switch (getBasic(Unshared)) {
+        case HeapType::ext:
+        case HeapType::func:
+        case HeapType::cont:
+        case HeapType::any:
+        case HeapType::exn:
+          break;
+        case HeapType::eq:
+          depth++;
+          break;
+        case HeapType::i31:
+        case HeapType::struct_:
+        case HeapType::array:
+        case HeapType::string:
+          depth += 2;
+          break;
+        case HeapType::none:
+        case HeapType::nofunc:
+        case HeapType::nocont:
+        case HeapType::noext:
+        case HeapType::noexn:
+          // Bottom types are infinitely deep.
+          depth = size_t(-1l);
+      }
+      break;
+    case HeapTypeKind::Func:
+    case HeapTypeKind::Cont:
+      ++depth;
+      break;
+    case HeapTypeKind::Struct:
       // specific struct types <: struct <: eq <: any
       depth += 3;
-    } else if (isArray()) {
+      break;
+    case HeapTypeKind::Array:
       // specific array types <: array <: eq <: any
       depth += 3;
-    }
-  } else {
-    // Some basic types have supers.
-    switch (getBasic(Unshared)) {
-      case HeapType::ext:
-      case HeapType::func:
-      case HeapType::cont:
-      case HeapType::any:
-      case HeapType::exn:
-        break;
-      case HeapType::eq:
-        depth++;
-        break;
-      case HeapType::i31:
-      case HeapType::struct_:
-      case HeapType::array:
-      case HeapType::string:
-        depth += 2;
-        break;
-      case HeapType::none:
-      case HeapType::nofunc:
-      case HeapType::nocont:
-      case HeapType::noext:
-      case HeapType::noexn:
-        // Bottom types are infinitely deep.
-        depth = size_t(-1l);
-    }
+      break;
   }
   return depth;
 }
@@ -1353,31 +1261,30 @@ bool HeapType::isSubType(HeapType left, HeapType right) {
 }
 
 std::vector<Type> HeapType::getTypeChildren() const {
-  if (isBasic()) {
-    return {};
-  }
-  if (isStruct()) {
-    std::vector<Type> children;
-    for (auto& field : getStruct().fields) {
-      children.push_back(field.type);
-    }
-    return children;
-  }
-  if (isArray()) {
-    return {getArray().element.type};
-  }
-  if (isSignature()) {
-    std::vector<Type> children;
-    auto sig = getSignature();
-    for (auto tuple : {sig.params, sig.results}) {
-      for (auto t : tuple) {
-        children.push_back(t);
+  switch (getKind()) {
+    case HeapTypeKind::Basic:
+      return {};
+    case HeapTypeKind::Func: {
+      std::vector<Type> children;
+      auto sig = getSignature();
+      for (auto tuple : {sig.params, sig.results}) {
+        for (auto t : tuple) {
+          children.push_back(t);
+        }
       }
+      return children;
     }
-    return children;
-  }
-  if (isContinuation()) {
-    return {};
+    case HeapTypeKind::Struct: {
+      std::vector<Type> children;
+      for (auto& field : getStruct().fields) {
+        children.push_back(field.type);
+      }
+      return children;
+    }
+    case HeapTypeKind::Array:
+      return {getArray().element.type};
+    case HeapTypeKind::Cont:
+      return {};
   }
   WASM_UNREACHABLE("unexpected kind");
 }
@@ -1586,16 +1493,21 @@ TypeNames DefaultTypeNameGenerator::getNames(HeapType type) {
   if (inserted) {
     // Generate a new name for this type we have not previously seen.
     std::stringstream stream;
-    if (type.isSignature()) {
-      stream << "func." << funcCount++;
-    } else if (type.isContinuation()) {
-      stream << "cont." << contCount++;
-    } else if (type.isStruct()) {
-      stream << "struct." << structCount++;
-    } else if (type.isArray()) {
-      stream << "array." << arrayCount++;
-    } else {
-      WASM_UNREACHABLE("unexpected kind");
+    switch (type.getKind()) {
+      case HeapTypeKind::Func:
+        stream << "func." << funcCount++;
+        break;
+      case HeapTypeKind::Struct:
+        stream << "struct." << structCount++;
+        break;
+      case HeapTypeKind::Array:
+        stream << "array." << arrayCount++;
+        break;
+      case HeapTypeKind::Cont:
+        stream << "cont." << contCount++;
+        break;
+      case HeapTypeKind::Basic:
+        WASM_UNREACHABLE("unexpected kind");
     }
     it->second = {stream.str(), {}};
   }
@@ -1972,16 +1884,21 @@ std::ostream& TypePrinter::print(HeapType type) {
   if (type.isShared()) {
     os << "(shared ";
   }
-  if (type.isSignature()) {
-    print(type.getSignature());
-  } else if (type.isContinuation()) {
-    print(type.getContinuation());
-  } else if (type.isStruct()) {
-    print(type.getStruct(), names.fieldNames);
-  } else if (type.isArray()) {
-    print(type.getArray());
-  } else {
-    WASM_UNREACHABLE("unexpected type");
+  switch (type.getKind()) {
+    case HeapTypeKind::Func:
+      print(type.getSignature());
+      break;
+    case HeapTypeKind::Struct:
+      print(type.getStruct(), names.fieldNames);
+      break;
+    case HeapTypeKind::Array:
+      print(type.getArray());
+      break;
+    case HeapTypeKind::Cont:
+      print(type.getContinuation());
+      break;
+    case HeapTypeKind::Basic:
+      WASM_UNREACHABLE("unexpected kind");
   }
   if (type.isShared()) {
     os << ')';
@@ -2096,7 +2013,7 @@ size_t RecGroupHasher::hash(Type type) const {
   if (type.isBasic()) {
     wasm::rehash(digest, type.getID());
   } else {
-    hash_combine(digest, hash(*getTypeInfo(type)));
+    hash_combine(digest, hash(*Type::getTypeInfo(type)));
   }
   return digest;
 }
@@ -2228,7 +2145,7 @@ bool RecGroupEquator::eq(Type a, Type b) const {
   if (a.isBasic() || b.isBasic()) {
     return a == b;
   }
-  return eq(*getTypeInfo(a), *getTypeInfo(b));
+  return eq(*Type::getTypeInfo(a), *Type::getTypeInfo(b));
 }
 
 bool RecGroupEquator::eq(HeapType a, HeapType b) const {
@@ -2378,7 +2295,7 @@ template<typename Self> void TypeGraphWalkerBase<Self>::scanType(Type* type) {
   if (type->isBasic()) {
     return;
   }
-  auto* info = getTypeInfo(*type);
+  auto* info = Type::getTypeInfo(*type);
   switch (info->kind) {
     case TypeInfo::TupleKind: {
       auto& types = info->tuple;
@@ -2784,7 +2701,7 @@ buildRecGroup(std::unique_ptr<RecGroupInfo>&& groupInfo,
   auto canonicalizeTypes = [&](bool tuples) {
     for (auto& [original, uses] : locations.types) {
       if (original.isTuple() == tuples) {
-        Type canonical = globalTypeStore.insert(*getTypeInfo(original));
+        Type canonical = globalTypeStore.insert(*Type::getTypeInfo(original));
         for (Type* use : uses) {
           *use = canonical;
         }
@@ -2872,17 +2789,9 @@ void TypeBuilder::dump() {
 std::unordered_set<HeapType> getIgnorablePublicTypes() {
   auto array8 = Array(Field(Field::i8, Mutable));
   auto array16 = Array(Field(Field::i16, Mutable));
-  TypeBuilder builder(4);
-  // We handle final and non-final here, but should remove one of them
-  // eventually TODO
+  TypeBuilder builder(2);
   builder[0] = array8;
-  builder[0].setOpen(false);
   builder[1] = array16;
-  builder[1].setOpen(false);
-  builder[2] = array8;
-  builder[2].setOpen(true);
-  builder[3] = array16;
-  builder[3].setOpen(true);
   auto result = builder.build();
   assert(result);
   std::unordered_set<HeapType> ret;

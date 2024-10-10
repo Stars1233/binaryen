@@ -179,6 +179,13 @@ enum UnaryOp {
   NegVecI64x2,
   AllTrueVecI64x2,
   BitmaskVecI64x2,
+  AbsVecF16x8,
+  NegVecF16x8,
+  SqrtVecF16x8,
+  CeilVecF16x8,
+  FloorVecF16x8,
+  TruncVecF16x8,
+  NearestVecF16x8,
   AbsVecF32x4,
   NegVecF32x4,
   SqrtVecF32x4,
@@ -231,6 +238,10 @@ enum UnaryOp {
 
   // Half precision SIMD
   SplatVecF16x8,
+  TruncSatSVecF16x8ToVecI16x8,
+  TruncSatUVecF16x8ToVecI16x8,
+  ConvertSVecI16x8ToVecF16x8,
+  ConvertUVecI16x8ToVecF16x8,
 
   InvalidUnary
 };
@@ -452,6 +463,14 @@ enum BinaryOp {
   ExtMulHighSVecI64x2,
   ExtMulLowUVecI64x2,
   ExtMulHighUVecI64x2,
+  AddVecF16x8,
+  SubVecF16x8,
+  MulVecF16x8,
+  DivVecF16x8,
+  MinVecF16x8,
+  MaxVecF16x8,
+  PMinVecF16x8,
+  PMaxVecF16x8,
   AddVecF32x4,
   SubVecF32x4,
   MulVecF32x4,
@@ -559,10 +578,12 @@ enum SIMDTernaryOp {
   Bitselect,
 
   // Relaxed SIMD
-  RelaxedFmaVecF32x4,
-  RelaxedFmsVecF32x4,
-  RelaxedFmaVecF64x2,
-  RelaxedFmsVecF64x2,
+  RelaxedMaddVecF16x8,
+  RelaxedNmaddVecF16x8,
+  RelaxedMaddVecF32x4,
+  RelaxedNmaddVecF32x4,
+  RelaxedMaddVecF64x2,
+  RelaxedNmaddVecF64x2,
   LaneselectI8x16,
   LaneselectI16x8,
   LaneselectI32x4,
@@ -2052,22 +2073,25 @@ public:
   std::unordered_map<Index, Name> localNames;
   std::unordered_map<Name, Index> localIndices;
 
-  // Source maps debugging info: map expression nodes to their file, line, col.
+  // Source maps debugging info: map expression nodes to their file, line, col,
+  // symbol name.
   struct DebugLocation {
     BinaryLocation fileIndex, lineNumber, columnNumber;
+    std::optional<BinaryLocation> symbolNameIndex;
     bool operator==(const DebugLocation& other) const {
       return fileIndex == other.fileIndex && lineNumber == other.lineNumber &&
-             columnNumber == other.columnNumber;
+             columnNumber == other.columnNumber &&
+             symbolNameIndex == other.symbolNameIndex;
     }
     bool operator!=(const DebugLocation& other) const {
       return !(*this == other);
     }
     bool operator<(const DebugLocation& other) const {
-      return fileIndex != other.fileIndex
-               ? fileIndex < other.fileIndex
-               : lineNumber != other.lineNumber
-                   ? lineNumber < other.lineNumber
-                   : columnNumber < other.columnNumber;
+      return fileIndex != other.fileIndex     ? fileIndex < other.fileIndex
+             : lineNumber != other.lineNumber ? lineNumber < other.lineNumber
+             : columnNumber != other.columnNumber
+               ? columnNumber < other.columnNumber
+               : symbolNameIndex < other.symbolNameIndex;
     }
   };
   // One can explicitly set the debug location of an expression to
@@ -2279,6 +2303,7 @@ public:
 
   // Source maps debug info.
   std::vector<std::string> debugInfoFileNames;
+  std::vector<std::string> debugInfoSymbolNames;
 
   // `features` are the features allowed to be used in this module and should be
   // respected regardless of the value of`hasFeaturesSection`.
@@ -2291,6 +2316,7 @@ public:
   Name name;
 
   std::unordered_map<HeapType, TypeNames> typeNames;
+  std::unordered_map<HeapType, Index> typeIndices;
 
   MixedArena allocator;
 
@@ -2379,6 +2405,9 @@ public:
 // Utility for printing an expression with named types.
 using ModuleExpression = std::pair<Module&, Expression*>;
 
+// Utility for printing an type with a name, if the module defines a name.
+using ModuleType = std::pair<Module&, Type>;
+
 // Utility for printing only the top level of an expression. Named types will be
 // used if `module` is non-null.
 struct ShallowExpression {
@@ -2400,6 +2429,7 @@ std::ostream& operator<<(std::ostream& o, wasm::Function& func);
 std::ostream& operator<<(std::ostream& o, wasm::Expression& expression);
 std::ostream& operator<<(std::ostream& o, wasm::ModuleExpression pair);
 std::ostream& operator<<(std::ostream& o, wasm::ShallowExpression expression);
+std::ostream& operator<<(std::ostream& o, wasm::ModuleType pair);
 
 } // namespace std
 

@@ -372,6 +372,13 @@ template<typename Subtype> struct ChildTyper : OverriddenVisitor<Subtype> {
       case NegVecI16x8:
       case NegVecI32x4:
       case NegVecI64x2:
+      case AbsVecF16x8:
+      case NegVecF16x8:
+      case SqrtVecF16x8:
+      case CeilVecF16x8:
+      case FloorVecF16x8:
+      case TruncVecF16x8:
+      case NearestVecF16x8:
       case AbsVecF32x4:
       case NegVecF32x4:
       case SqrtVecF32x4:
@@ -416,6 +423,10 @@ template<typename Subtype> struct ChildTyper : OverriddenVisitor<Subtype> {
       case RelaxedTruncUVecF32x4ToVecI32x4:
       case RelaxedTruncZeroSVecF64x2ToVecI32x4:
       case RelaxedTruncZeroUVecF64x2ToVecI32x4:
+      case TruncSatSVecF16x8ToVecI16x8:
+      case TruncSatUVecF16x8ToVecI16x8:
+      case ConvertSVecI16x8ToVecF16x8:
+      case ConvertUVecI16x8ToVecF16x8:
       case AnyTrueVec128:
       case AllTrueVecI8x16:
       case AllTrueVecI16x8:
@@ -627,6 +638,14 @@ template<typename Subtype> struct ChildTyper : OverriddenVisitor<Subtype> {
       case ExtMulHighSVecI64x2:
       case ExtMulLowUVecI64x2:
       case ExtMulHighUVecI64x2:
+      case AddVecF16x8:
+      case SubVecF16x8:
+      case MulVecF16x8:
+      case DivVecF16x8:
+      case MinVecF16x8:
+      case MaxVecF16x8:
+      case PMinVecF16x8:
+      case PMaxVecF16x8:
       case AddVecF32x4:
       case SubVecF32x4:
       case MulVecF32x4:

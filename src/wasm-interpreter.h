@@ -47,8 +47,7 @@
 namespace wasm {
 
 struct WasmException {
-  Name tag;
-  Literals values;
+  Literal exn;
 };
 std::ostream& operator<<(std::ostream& o, const WasmException& exn);
 
@@ -192,8 +191,11 @@ protected:
   // data, as we don't have a cycle collector. Those leaks are not a serious
   // problem as Binaryen is not really used in long-running tasks, so we ignore
   // this function in LSan.
-  Literal makeGCData(const Literals& data, Type type) {
-    auto allocation = std::make_shared<GCData>(type.getHeapType(), data);
+  //
+  // This consumes the input |data| entirely.
+  Literal makeGCData(Literals&& data, Type type) {
+    auto allocation =
+      std::make_shared<GCData>(type.getHeapType(), std::move(data));
 #if __has_feature(leak_sanitizer) || __has_feature(address_sanitizer)
     // GC data with cycles will leak, since shared_ptrs do not handle cycles.
     // Binaryen is generally not used in long-running programs so we just ignore
@@ -202,6 +204,15 @@ protected:
     __lsan_ignore_object(allocation.get());
 #endif
     return Literal(allocation, type.getHeapType());
+  }
+
+  // Same as makeGCData but for ExnData.
+  Literal makeExnData(Name tag, const Literals& payload) {
+    auto allocation = std::make_shared<ExnData>(tag, payload);
+#if __has_feature(leak_sanitizer) || __has_feature(address_sanitizer)
+    __lsan_ignore_object(allocation.get());
+#endif
+    return Literal(allocation);
   }
 
 public:
@@ -226,9 +237,9 @@ public:
       if (type.isConcrete() || curr->type.isConcrete()) {
 #if 1 // def WASM_INTERPRETER_DEBUG
         if (!Type::isSubType(type, curr->type)) {
-          std::cerr << "expected " << curr->type << ", seeing " << type
-                    << " from\n"
-                    << *curr << '\n';
+          std::cerr << "expected " << ModuleType(*module, curr->type)
+                    << ", seeing " << ModuleType(*module, type) << " from\n"
+                    << ModuleExpression(*module, curr) << '\n';
         }
 #endif
         assert(Type::isSubType(type, curr->type));
@@ -523,6 +534,20 @@ public:
         return value.allTrueI64x2();
       case BitmaskVecI64x2:
         return value.bitmaskI64x2();
+      case AbsVecF16x8:
+        return value.absF16x8();
+      case NegVecF16x8:
+        return value.negF16x8();
+      case SqrtVecF16x8:
+        return value.sqrtF16x8();
+      case CeilVecF16x8:
+        return value.ceilF16x8();
+      case FloorVecF16x8:
+        return value.floorF16x8();
+      case TruncVecF16x8:
+        return value.truncF16x8();
+      case NearestVecF16x8:
+        return value.nearestF16x8();
       case AbsVecF32x4:
         return value.absF32x4();
       case NegVecF32x4:
@@ -607,6 +632,14 @@ public:
         return value.demoteZeroToF32x4();
       case PromoteLowVecF32x4ToVecF64x2:
         return value.promoteLowToF64x2();
+      case TruncSatSVecF16x8ToVecI16x8:
+        return value.truncSatToSI16x8();
+      case TruncSatUVecF16x8ToVecI16x8:
+        return value.truncSatToUI16x8();
+      case ConvertSVecI16x8ToVecF16x8:
+        return value.convertSToF16x8();
+      case ConvertUVecI16x8ToVecF16x8:
+        return value.convertUToF16x8();
       case InvalidUnary:
         WASM_UNREACHABLE("invalid unary op");
     }
@@ -1006,6 +1039,23 @@ public:
       case ExtMulHighUVecI64x2:
         return left.extMulHighUI64x2(right);
 
+      case AddVecF16x8:
+        return left.addF16x8(right);
+      case SubVecF16x8:
+        return left.subF16x8(right);
+      case MulVecF16x8:
+        return left.mulF16x8(right);
+      case DivVecF16x8:
+        return left.divF16x8(right);
+      case MinVecF16x8:
+        return left.minF16x8(right);
+      case MaxVecF16x8:
+        return left.maxF16x8(right);
+      case PMinVecF16x8:
+        return left.pminF16x8(right);
+      case PMaxVecF16x8:
+        return left.pmaxF16x8(right);
+
       case AddVecF32x4:
         return left.addF32x4(right);
       case SubVecF32x4:
@@ -1162,14 +1212,18 @@ public:
       case LaneselectI64x2:
         return c.bitselectV128(a, b);
 
-      case RelaxedFmaVecF32x4:
-        return a.relaxedFmaF32x4(b, c);
-      case RelaxedFmsVecF32x4:
-        return a.relaxedFmsF32x4(b, c);
-      case RelaxedFmaVecF64x2:
-        return a.relaxedFmaF64x2(b, c);
-      case RelaxedFmsVecF64x2:
-        return a.relaxedFmsF64x2(b, c);
+      case RelaxedMaddVecF16x8:
+        return a.relaxedMaddF16x8(b, c);
+      case RelaxedNmaddVecF16x8:
+        return a.relaxedNmaddF16x8(b, c);
+      case RelaxedMaddVecF32x4:
+        return a.relaxedMaddF32x4(b, c);
+      case RelaxedNmaddVecF32x4:
+        return a.relaxedNmaddF32x4(b, c);
+      case RelaxedMaddVecF64x2:
+        return a.relaxedMaddF64x2(b, c);
+      case RelaxedNmaddVecF64x2:
+        return a.relaxedNmaddF64x2(b, c);
       default:
         // TODO: implement signselect and dot_add
         WASM_UNREACHABLE("not implemented");
@@ -1428,16 +1482,25 @@ public:
       return flow;
     }
     NOTE_EVAL1(curr->tag);
-    WasmException exn;
-    exn.tag = curr->tag;
-    for (auto item : arguments) {
-      exn.values.push_back(item);
-    }
-    throwException(exn);
+    throwException(WasmException{makeExnData(curr->tag, arguments)});
     WASM_UNREACHABLE("throw");
   }
   Flow visitRethrow(Rethrow* curr) { WASM_UNREACHABLE("unimp"); }
-  Flow visitThrowRef(ThrowRef* curr) { WASM_UNREACHABLE("unimp"); }
+  Flow visitThrowRef(ThrowRef* curr) {
+    NOTE_ENTER("ThrowRef");
+    Flow flow = visit(curr->exnref);
+    if (flow.breaking()) {
+      return flow;
+    }
+    const auto& exnref = flow.getSingleValue();
+    NOTE_EVAL1(exnref);
+    if (exnref.isNull()) {
+      trap("null ref");
+    }
+    assert(exnref.isExn());
+    throwException(WasmException{exnref});
+    WASM_UNREACHABLE("throw");
+  }
   Flow visitRefI31(RefI31* curr) {
     NOTE_ENTER("RefI31");
     Flow flow = visit(curr->value);
@@ -1603,7 +1666,7 @@ public:
         data[i] = truncateForPacking(value.getSingleValue(), field);
       }
     }
-    return makeGCData(data, curr->type);
+    return makeGCData(std::move(data), curr->type);
   }
   Flow visitStructGet(StructGet* curr) {
     NOTE_ENTER("StructGet");
@@ -1683,7 +1746,7 @@ public:
         data[i] = value;
       }
     }
-    return makeGCData(data, curr->type);
+    return makeGCData(std::move(data), curr->type);
   }
   Flow visitArrayNewData(ArrayNewData* curr) { WASM_UNREACHABLE("unimp"); }
   Flow visitArrayNewElem(ArrayNewElem* curr) { WASM_UNREACHABLE("unimp"); }
@@ -1714,7 +1777,7 @@ public:
       }
       data[i] = truncateForPacking(value.getSingleValue(), field);
     }
-    return makeGCData(data, curr->type);
+    return makeGCData(std::move(data), curr->type);
   }
   Flow visitArrayGet(ArrayGet* curr) {
     NOTE_ENTER("ArrayGet");
@@ -1919,7 +1982,7 @@ public:
             contents.push_back(ptrDataValues[i]);
           }
         }
-        return makeGCData(contents, curr->type);
+        return makeGCData(std::move(contents), curr->type);
       }
       case StringNewFromCodePoint: {
         uint32_t codePoint = ptr.getSingleValue().getUnsigned();
@@ -1989,7 +2052,7 @@ public:
       contents.push_back(l);
     }
 
-    return makeGCData(contents, curr->type);
+    return makeGCData(std::move(contents), curr->type);
   }
   Flow visitStringEncode(StringEncode* curr) {
     // For now we only support JS-style strings into arrays.
@@ -2151,7 +2214,7 @@ public:
         }
       }
     }
-    return makeGCData(contents, curr->type);
+    return makeGCData(std::move(contents), curr->type);
   }
 
   virtual void trap(const char* why) { WASM_UNREACHABLE("unimp"); }
@@ -2162,7 +2225,7 @@ public:
     WASM_UNREACHABLE("unimp");
   }
 
-private:
+protected:
   // Truncate the value if we need to. The storage is just a list of Literals,
   // so we can't just write the value like we would to a C struct field and
   // expect it to truncate for us. Instead, we truncate so the stored value is
@@ -2196,6 +2259,24 @@ private:
       }
     }
     return value;
+  }
+
+  Literal makeFromMemory(void* p, Field field) {
+    switch (field.packedType) {
+      case Field::not_packed:
+        return Literal::makeFromMemory(p, field.type);
+      case Field::i8: {
+        int8_t i;
+        memcpy(&i, p, sizeof(i));
+        return truncateForPacking(Literal(int32_t(i)), field);
+      }
+      case Field::i16: {
+        int16_t i;
+        memcpy(&i, p, sizeof(i));
+        return truncateForPacking(Literal(int32_t(i)), field);
+      }
+    }
+    WASM_UNREACHABLE("unexpected type");
   }
 };
 
@@ -2453,6 +2534,10 @@ public:
   }
   Flow visitTry(Try* curr) {
     NOTE_ENTER("Try");
+    return Flow(NONCONSTANT_FLOW);
+  }
+  Flow visitTryTable(TryTable* curr) {
+    NOTE_ENTER("TryTable");
     return Flow(NONCONSTANT_FLOW);
   }
   Flow visitRethrow(Rethrow* curr) {
@@ -3151,20 +3236,17 @@ public:
     }
     auto info = getTableInstanceInfo(curr->table);
 
-    Index tableSize = info.interface()->tableSize(info.name);
+    uint64_t tableSize = info.interface()->tableSize(info.name);
     auto* table = info.instance->wasm.getTable(info.name);
     Flow ret = Literal::makeFromInt64(tableSize, table->indexType);
     Flow fail = Literal::makeFromInt64(-1, table->indexType);
-    Index delta = deltaFlow.getSingleValue().geti32();
+    uint64_t delta = deltaFlow.getSingleValue().getUnsigned();
 
-    if (tableSize >= uint32_t(-1) - delta) {
+    uint64_t newSize;
+    if (std::ckd_add(&newSize, tableSize, delta)) {
       return fail;
     }
-    if (uint64_t(tableSize) + uint64_t(delta) > uint64_t(table->max)) {
-      return fail;
-    }
-    Index newSize = tableSize + delta;
-    if (newSize > WebLimitations::MaxTableSize) {
+    if (newSize > table->max || newSize > WebLimitations::MaxTableSize) {
       return fail;
     }
     if (!info.interface()->growTable(
@@ -3937,9 +4019,9 @@ public:
     contents.reserve(size);
     for (Index i = offset; i < end; i += elemBytes) {
       auto addr = (void*)&seg.data[i];
-      contents.push_back(Literal::makeFromMemory(addr, element));
+      contents.push_back(this->makeFromMemory(addr, element));
     }
-    return self()->makeGCData(contents, curr->type);
+    return self()->makeGCData(std::move(contents), curr->type);
   }
   Flow visitArrayNewElem(ArrayNewElem* curr) {
     NOTE_ENTER("ArrayNewElem");
@@ -3970,7 +4052,7 @@ public:
       auto val = self()->visit(seg.data[i]).getSingleValue();
       contents.push_back(val);
     }
-    return self()->makeGCData(contents, curr->type);
+    return self()->makeGCData(std::move(contents), curr->type);
   }
   Flow visitArrayInitData(ArrayInitData* curr) {
     NOTE_ENTER("ArrayInit");
@@ -4017,7 +4099,7 @@ public:
     }
     for (size_t i = 0; i < sizeVal; i++) {
       void* addr = (void*)&seg->data[offsetVal + i * elemSize];
-      data->values[indexVal + i] = Literal::makeFromMemory(addr, elem);
+      data->values[indexVal + i] = this->makeFromMemory(addr, elem);
     }
     return {};
   }
@@ -4103,9 +4185,10 @@ public:
         return ret;
       };
 
+      auto exnData = e.exn.getExnData();
       for (size_t i = 0; i < curr->catchTags.size(); i++) {
-        if (curr->catchTags[i] == e.tag) {
-          multiValues.push_back(e.values);
+        if (curr->catchTags[i] == exnData->tag) {
+          multiValues.push_back(exnData->payload);
           return processCatchBody(curr->catchBodies[i]);
         }
       }
@@ -4116,6 +4199,32 @@ public:
         scope->currDelegateTarget = curr->delegateTarget;
       }
       // This exception is not caught by this try-catch. Rethrow it.
+      throw;
+    }
+  }
+  Flow visitTryTable(TryTable* curr) {
+    NOTE_ENTER("TryTable");
+    try {
+      return self()->visit(curr->body);
+    } catch (const WasmException& e) {
+      auto exnData = e.exn.getExnData();
+      for (size_t i = 0; i < curr->catchTags.size(); i++) {
+        auto catchTag = curr->catchTags[i];
+        if (!catchTag.is() || catchTag == exnData->tag) {
+          Flow ret;
+          ret.breakTo = curr->catchDests[i];
+          if (catchTag.is()) {
+            for (auto item : exnData->payload) {
+              ret.values.push_back(item);
+            }
+          }
+          if (curr->catchRefs[i]) {
+            ret.values.push_back(e.exn);
+          }
+          return ret;
+        }
+      }
+      // This exception is not caught by this try_table. Rethrow it.
       throw;
     }
   }

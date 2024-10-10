@@ -15,6 +15,16 @@ full changeset diff at the end of each section.
 Current Trunk
 -------------
 
+ - Many compile time speedups were implemented (2x overall improvement), see
+   https://github.com/WebAssembly/binaryen/issues/4165#issuecomment-2372548271
+ - [wasm-split] Add a multi-split mode. (#6943)
+ - Add a `--preserve-type-order` option that minimizes text format changes in
+   type ordering. (#6916)
+ - Add a J2CL specific pass that moves itable entries to vtables. (#6888)
+
+v119
+----
+
  - Passes can now receive individual pass arguments, that is --foo=A --foo=B for
    a pass foo will run the pass twice (which was possible before) and will now
    run it first with argument A and second with B. --pass-arg=foo@BAR will now
@@ -29,6 +39,11 @@ Current Trunk
    passes). (#6713)
  - A C APIs for getting/setting the type of Functions (#6721).
  - Allow using `--skip-pass` on the commandline multiple times (#6714).
+ - The instructions relaxed_fma and relaxed_fnma have been renamed to
+   relaxed_madd and relaxed_nmadd.
+ - Add a new `--heap-store-optimization` pass. (#6882)
+ - Add a pass for minimizing recursion groups. (#6832)
+
 
 v118
 ----
