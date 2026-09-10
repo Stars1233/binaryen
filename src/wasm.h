@@ -953,9 +953,9 @@ class Call : public SpecificExpression<Expression::CallId> {
 public:
   Call(MixedArena& allocator) : operands(allocator) {}
 
+  bool isReturn = false;
   ExpressionList operands;
   Name target;
-  bool isReturn = false;
 
   void finalize();
 };
@@ -963,11 +963,12 @@ public:
 class CallIndirect : public SpecificExpression<Expression::CallIndirectId> {
 public:
   CallIndirect(MixedArena& allocator) : operands(allocator) {}
+
+  bool isReturn = false;
   HeapType heapType;
   ExpressionList operands;
   Expression* target;
   Name table;
-  bool isReturn = false;
 
   void finalize();
 };
@@ -1061,12 +1062,12 @@ public:
   AtomicRMW(MixedArena& allocator) : AtomicRMW() {}
 
   AtomicRMWOp op;
+  MemoryOrder order = MemoryOrder::SeqCst;
   uint8_t bytes;
   Address offset;
   Expression* ptr;
   Expression* value;
   Name memory;
-  MemoryOrder order = MemoryOrder::SeqCst;
 
   void finalize();
 };
@@ -1077,12 +1078,12 @@ public:
   AtomicCmpxchg(MixedArena& allocator) : AtomicCmpxchg() {}
 
   uint8_t bytes;
+  MemoryOrder order = MemoryOrder::SeqCst;
   Address offset;
   Expression* ptr;
   Expression* expected;
   Expression* replacement;
   Name memory;
-  MemoryOrder order = MemoryOrder::SeqCst;
 
   void finalize();
 };
@@ -1146,9 +1147,9 @@ public:
   SIMDReplace() = default;
   SIMDReplace(MixedArena& allocator) : SIMDReplace() {}
 
+  uint8_t index;
   SIMDReplaceOp op;
   Expression* vec;
-  uint8_t index;
   Expression* value;
 
   void finalize();
@@ -1663,8 +1664,8 @@ public:
   I31Get() = default;
   I31Get(MixedArena& allocator) {}
 
-  Expression* i31;
   bool signed_ = false;
+  Expression* i31;
 
   void finalize();
 };
@@ -1672,9 +1673,10 @@ public:
 class CallRef : public SpecificExpression<Expression::CallRefId> {
 public:
   CallRef(MixedArena& allocator) : operands(allocator) {}
+
+  bool isReturn = false;
   ExpressionList operands;
   Expression* target;
-  bool isReturn = false;
 
   void finalize();
 };
@@ -1794,10 +1796,10 @@ public:
   StructRMW(MixedArena& allocator) {}
 
   AtomicRMWOp op;
+  MemoryOrder order;
   Index index;
   Expression* ref;
   Expression* value;
-  MemoryOrder order;
 
   void finalize();
 };
@@ -1807,11 +1809,11 @@ public:
   StructCmpxchg() = default;
   StructCmpxchg(MixedArena& allocator) {}
 
+  MemoryOrder order;
   Index index;
   Expression* ref;
   Expression* expected;
   Expression* replacement;
-  MemoryOrder order;
 
   void finalize();
 };
@@ -2040,11 +2042,11 @@ public:
   ArrayRMW() = default;
   ArrayRMW(MixedArena& allocator) {}
 
+  MemoryOrder order;
   AtomicRMWOp op;
   Expression* ref;
   Expression* index;
   Expression* value;
-  MemoryOrder order;
 
   void finalize();
 };
@@ -2054,11 +2056,11 @@ public:
   ArrayCmpxchg() = default;
   ArrayCmpxchg(MixedArena& allocator) {}
 
+  MemoryOrder order;
   Expression* ref;
   Expression* index;
   Expression* expected;
   Expression* replacement;
-  MemoryOrder order;
 
   void finalize();
 };
