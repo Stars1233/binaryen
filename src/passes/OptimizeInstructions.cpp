@@ -49,6 +49,7 @@
 
 #include "call-utils.h"
 #include "support/utilities.h"
+#include "wasm-type.h"
 
 // TODO: Use the new sign-extension opcodes where appropriate. This needs to be
 // conditionalized on the availability of atomics.
@@ -2827,6 +2828,51 @@ struct OptimizeInstructions
   void visitRefGetDesc(RefGetDesc* curr) {
     skipNonNullCast(curr->ref, curr);
     trapOnNull(curr, curr->ref);
+  }
+
+  void visitPublish(Publish* curr) {
+    if (curr->type == Type::unreachable) {
+      return;
+    }
+
+    // Publish of a reference that cannot be a shared array or struct can be
+    // removed.
+    auto canBeSharedArrayOrStruct = [](Type type) {
+      if (!type.isRef()) {
+        return false;
+      }
+      auto ht = type.getHeapType();
+      if (ht.isBottom() || ht.isMaybeShared(HeapType::i31)) {
+        return false;
+      }
+      return HeapType::isSubType(ht, HeapTypes::any.getBasic(Shared));
+    };
+
+    if (!canBeSharedArrayOrStruct(getFallthroughType(curr->ref))) {
+      replaceCurrent(curr->ref);
+      return;
+    }
+
+    auto isAllocation = [](Expression* expr) {
+      return expr->is<StructNew>() || expr->is<ArrayNew>() ||
+             expr->is<ArrayNewData>() || expr->is<ArrayNewElem>() ||
+             expr->is<ArrayNewFixed>();
+    };
+
+    // Publish of publish or of a struct/array allocation can be removed.
+    Expression* fallthrough = curr->ref;
+    while (true) {
+      if (fallthrough->is<Publish>() || isAllocation(fallthrough)) {
+        replaceCurrent(curr->ref);
+        return;
+      }
+      auto* next = Properties::getImmediateFallthrough(
+        fallthrough, getPassOptions(), *getModule());
+      if (next == fallthrough) {
+        break;
+      }
+      fallthrough = next;
+    }
   }
 
   void visitTupleExtract(TupleExtract* curr) {
